@@ -1,10 +1,11 @@
 from django import forms
-from django.forms import TextInput, Textarea, NumberInput, widgets
+from django.forms import TextInput, Textarea, NumberInput, widgets, formset_factory
 from djrichtextfield.widgets import RichTextWidget
 from jsoneditor.forms import JSONEditor
 from jsonfield.forms import JSONFormField
 
 from course.models import MultipleChoiceQuestion, DIFFICULTY_CHOICES, CheckboxQuestion, JavaQuestion, QuestionCategory
+from course.widgets import RadioInlineSelect
 
 
 class ProblemCreateForm(forms.ModelForm):
@@ -13,72 +14,43 @@ class ProblemCreateForm(forms.ModelForm):
 
         self.fields['category'].widget.attrs.update({'class': 'form-control'})
         self.fields['difficulty'].widget.attrs.update({'class': 'form-control'})
-
-    max_submission_allowed = forms.IntegerField(
-        widget=NumberInput(attrs={
-            'class': 'form-control',
-        })
-    )
+        self.fields['difficulty'].initial = "EASY"
 
     title = forms.CharField(
+        label="Question Name",
         widget=TextInput(attrs={
             'class': 'form-control'
         })
     )
 
     text = forms.CharField(
-        label='Statement',
+        label='Question',
         widget=RichTextWidget(field_settings='advanced')
     )
 
     answer = forms.CharField(
-        widget=Textarea(attrs={
-            'class': 'form-control'
+        initial="",
+        widget=forms.HiddenInput(attrs={
+            'class': 'form-control',
         })
-    )
-
-    tutorial = forms.CharField(
-        widget=RichTextWidget(field_settings='advanced')
     )
 
 
 class ChoiceProblemCreateForm(ProblemCreateForm):
     variables = JSONFormField(
-        widget=JSONEditor(),
-        help_text="""
-        It should be an array with each element a set of variables to choose.
-        A valid example:
-        [
-            {
-                "x" : 1,
-                "y" : 2,
-            },
-            {
-                "x" : 5,
-                "y" : 8,
-            }
-        ]
-        """
+        initial='[{}]',
+        widget=forms.HiddenInput(),
     )
 
     choices = JSONFormField(
-        widget=JSONEditor(),
-        help_text="""
-        It should be an object of choices.
-        A valid example:
-        {
-            "a" : "{{x}} is odd and {{y}} is odd",
-            "b" : "{{x}} is even and {{y}} is odd",
-            "c" : "{{x}} is odd and {{y}} is even",
-            "d" : "{{x}} is even and {{y}} is even"
-        }
-        """
+        widget=forms.HiddenInput(),
+        initial='{}',
     )
 
 
 class ProblemFilterForm(forms.Form):
     query = forms.CharField(
-        label='Search',
+        label='Search in Question Name',
         required=False,
         widget=widgets.TextInput(attrs={
             'class': 'form-control',
@@ -97,17 +69,18 @@ class ProblemFilterForm(forms.Form):
     category = forms.ModelChoiceField(
         required=False,
         empty_label='All',
-        queryset=QuestionCategory.objects.all(),
+        queryset=QuestionCategory.objects.filter(parent__isnull=True).all(),
         widget=widgets.Select(attrs={
             'class': 'form-control',
         })
     )
 
     solved = forms.ChoiceField(
+        label='Status',
         required=False,
         choices=[('', 'All'), ('Solved', 'Solved'), ('Partially Correct', 'Partially Correct'),
                  ('Unsolved', 'Unsolved'), ('Wrong', 'Wrong'),
-                 ('Unopened', 'Unopened')],
+                 ('New', 'New')],
         widget=widgets.Select(attrs={
             'class': 'form-control',
         })
@@ -118,31 +91,45 @@ class CheckboxQuestionForm(ChoiceProblemCreateForm):
     class Meta:
         model = CheckboxQuestion
         fields = (
-            'title', 'difficulty', 'max_submission_allowed', 'text', 'answer', 'tutorial', 'category', 'variables', 'choices')
+            'title', 'difficulty', 'category', 'text', 'visible_distractor_count')
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        self.fields['answer'].help_text = '\nPlease write the correct choices in this format.\nexample: [\'a\', \'b\']'
+
+    visible_distractor_count = forms.ChoiceField(
+        choices=[('999', 'All'), ('2', '2'), ('3', '3')],
+        initial='All',
+        widget=RadioInlineSelect()
+    )
+
+    answer = None
+    variables = None
+    choices = None
 
 
 class MultipleChoiceQuestionForm(ChoiceProblemCreateForm):
     class Meta:
         model = MultipleChoiceQuestion
         fields = (
-            'title', 'difficulty', 'max_submission_allowed', 'text', 'answer', 'tutorial', 'category', 'variables', 'choices')
+            'title', 'difficulty', 'category', 'text', 'visible_distractor_count')
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    visible_distractor_count = forms.ChoiceField(
+        choices=[('999', 'All'), ('2', '2'), ('3', '3')],
+        initial='All',
+        widget=RadioInlineSelect()
+    )
 
-        self.fields['answer'].help_text = '\nPlease only write the name of the correct choice'
+    variables = None
+    choices = None
+    answer = None
 
 
 class JavaQuestionForm(ProblemCreateForm):
     class Meta:
         model = JavaQuestion
         fields = (
-            'title', 'difficulty',  'max_submission_allowed', 'text', 'tutorial', 'category', 'test_cases')
+            'title', 'difficulty', 'category', 'text', 'test_cases')
         exclude = ('answer',)
 
     answer = None
@@ -164,3 +151,16 @@ class JavaQuestionForm(ProblemCreateForm):
         ]
         """
     )
+
+
+class ChoiceForm(forms.Form):
+    text = forms.CharField(
+        label='Answer',
+        widget=forms.TextInput(attrs={
+            'class': 'form-control',
+        })
+    )
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.empty_permitted = False

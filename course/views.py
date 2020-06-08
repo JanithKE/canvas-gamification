@@ -1,20 +1,65 @@
 from django.contrib import messages
+from django.contrib.auth.decorators import user_passes_test
 from django.core.exceptions import PermissionDenied
 from django.db.models import Q
+from django.forms import formset_factory
 from django.http import Http404, HttpResponseRedirect
 from django.shortcuts import render, get_object_or_404
 from django.urls import reverse_lazy
 
 from accounts.utils.decorators import show_login
 from course.forms import ProblemFilterForm, MultipleChoiceQuestionForm, CheckboxQuestionForm, \
-    JavaQuestionForm
+    JavaQuestionForm, ChoiceForm
 from course.models import Question, MultipleChoiceQuestion, CheckboxQuestion, JavaQuestion, JavaSubmission, \
     QuestionCategory, DIFFICULTY_CHOICES, TokenValue, MultipleChoiceSubmission
-from course.utils import get_token_value, get_user_question_junction
+from course.utils import get_token_value, get_user_question_junction, increment_char, create_multiple_choice_question, \
+    QuestionCreateException
 
 
 @show_login('You need to be logged in to create a question')
-def question_create_view(request, question_form_class):
+def _multiple_choice_question_create_view(request, header, question_form_class, correct_answer_formset_class,
+                                          distractor_answer_formset_class):
+    if request.method == 'POST':
+        correct_answer_formset = correct_answer_formset_class(request.POST, prefix='correct')
+        distractor_answer_formset = distractor_answer_formset_class(request.POST, prefix='distractor')
+        form = question_form_class(request.POST)
+
+        if correct_answer_formset.is_valid() and distractor_answer_formset.is_valid() and form.is_valid():
+
+            try:
+                question = create_multiple_choice_question(
+                    title=form.cleaned_data['title'],
+                    text=form.cleaned_data['text'],
+                    author=request.user,
+                    category=form.cleaned_data['category'],
+                    difficulty=form.cleaned_data['difficulty'],
+                    visible_distractor_count=form.cleaned_data['visible_distractor_count'],
+                    answer_text=correct_answer_formset.forms[0].cleaned_data['text'],
+                    distractors=[form.cleaned_data['text'] for form in distractor_answer_formset.forms if not form.cleaned_data['DELETE']],
+                )
+                messages.add_message(request, messages.SUCCESS, 'Problem was created successfully')
+                form = question_form_class()
+                correct_answer_formset = correct_answer_formset_class(prefix='correct')
+                distractor_answer_formset = distractor_answer_formset_class(prefix='distractor')
+                
+            except QuestionCreateException as e:
+                messages.add_message(request, messages.ERROR, e.user_message)
+    else:
+        form = question_form_class()
+
+        correct_answer_formset = correct_answer_formset_class(prefix='correct')
+        distractor_answer_formset = distractor_answer_formset_class(prefix='distractor')
+
+    return render(request, 'problem_create.html', {
+        'form': form,
+        'correct_answer_formset': correct_answer_formset,
+        'distractor_answer_formset': distractor_answer_formset,
+        'header': header,
+    })
+
+
+@show_login('You need to be logged in to create a question')
+def _java_question_create_view(request, header, question_form_class):
     if request.method == 'POST':
         form = question_form_class(request.POST)
 
@@ -32,20 +77,32 @@ def question_create_view(request, question_form_class):
 
     return render(request, 'problem_create.html', {
         'form': form,
-        'header': 'new_problem',
+        'header': header,
     })
 
 
 def java_question_create_view(request):
-    return question_create_view(request, JavaQuestionForm)
+    return _java_question_create_view(request, 'New Java Question', JavaQuestionForm)
 
 
 def multiple_choice_question_create_view(request):
-    return question_create_view(request, MultipleChoiceQuestionForm)
+    return _multiple_choice_question_create_view(
+        request,
+        'New Multiple Choice Question',
+        MultipleChoiceQuestionForm,
+        formset_factory(ChoiceForm, extra=1, can_delete=True, max_num=1, min_num=1),
+        formset_factory(ChoiceForm, extra=2, can_delete=True),
+    )
 
 
 def checkbox_question_create_view(request):
-    return question_create_view(request, CheckboxQuestionForm)
+    return _multiple_choice_question_create_view(
+        request,
+        'New Checkbox Question',
+        CheckboxQuestionForm,
+        formset_factory(ChoiceForm, extra=1, can_delete=True),
+        formset_factory(ChoiceForm, extra=2, can_delete=True),
+    )
 
 
 def multiple_choice_question_view(request, question, template_name):
@@ -156,6 +213,65 @@ def question_view(request, pk):
     raise Http404()
 
 
+def teacher_check(user):
+    return not user.is_anonymous and user.is_teacher()
+
+
+@user_passes_test(teacher_check)
+def multiple_choice_question_edit_view(request, question):
+    correct_answer_formset_class = formset_factory(ChoiceForm, extra=1, can_delete=True, max_num=1, min_num=1)
+    distractor_answer_formset_class = formset_factory(ChoiceForm, extra=0, can_delete=True)
+
+    if request.method == 'POST':
+        correct_answer_formset = correct_answer_formset_class(request.POST, prefix='correct')
+        distractor_answer_formset = distractor_answer_formset_class(request.POST, prefix='distractor')
+        form = MultipleChoiceQuestionForm(request.POST)
+
+        if correct_answer_formset.is_valid() and distractor_answer_formset.is_valid() and form.is_valid():
+            try:
+                create_multiple_choice_question(
+                    pk=question.pk,
+                    title=form.cleaned_data['title'],
+                    text=form.cleaned_data['text'],
+                    max_submission_allowed=question.max_submission_allowed,
+                    author=request.user,
+                    category=form.cleaned_data['category'],
+                    difficulty=form.cleaned_data['difficulty'],
+                    is_verified=question.is_verified,
+                    visible_distractor_count=form.cleaned_data['visible_distractor_count'],
+                    answer_text=correct_answer_formset.forms[0].cleaned_data['text'],
+                    distractors=[form.cleaned_data['text'] for form in distractor_answer_formset.forms],
+                )
+                messages.add_message(request, messages.SUCCESS, 'Problem saved successfully')
+            except QuestionCreateException as e:
+                messages.add_message(request, messages.ERROR, e.user_message)
+
+    else:
+        form = MultipleChoiceQuestionForm(instance=question)
+
+        correct_answer_formset = correct_answer_formset_class(prefix='correct',
+                                                              initial=[{'text': question.choices[question.answer]}])
+        distractor_answer_formset = distractor_answer_formset_class(prefix='distractor', initial=
+        [{'text': value} for name, value in question.choices.items() if name != question.answer]
+                                                                    )
+
+    return render(request, 'problem_create.html', {
+        'form': form,
+        'correct_answer_formset': correct_answer_formset,
+        'distractor_answer_formset': distractor_answer_formset,
+        'header': 'Edit Question',
+    })
+
+
+def question_edit_view(request, pk):
+    question = get_object_or_404(Question, pk=pk)
+
+    if isinstance(question, MultipleChoiceQuestion):
+        return multiple_choice_question_edit_view(request, question)
+
+    raise Http404()
+
+
 def problem_set_view(request):
     query = request.GET.get('query', None)
     difficulty = request.GET.get('difficulty', None)
@@ -169,7 +285,7 @@ def problem_set_view(request):
     if difficulty:
         q = q & Q(difficulty=difficulty)
     if category:
-        q = q & Q(category=category)
+        q = q & (Q(category=category) | Q(category__parent=category))
 
     problems = Question.objects.filter(q).all()
 
@@ -189,7 +305,7 @@ def problem_set_view(request):
         problems = [p for p in problems if p.is_partially_correct]
     if solved == 'Wrong':
         problems = [p for p in problems if p.is_wrong]
-    if solved == 'Unopened':
+    if solved == 'New':
         problems = [p for p in problems if p.no_submission]
 
     form = ProblemFilterForm(request.GET)
